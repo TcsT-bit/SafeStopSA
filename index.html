@@ -9,31 +9,31 @@
   :root {--bg:#0a0e1a;--card:#111827;--accent:#ef4444;--safe:#10b981;--text:#f9fafb;--muted:#9ca3af;--warn:#f59e0b}
   body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);margin:0;padding:15px;text-align:center}
   h1{font-size:22px;margin:10px 0;color:var(--accent)}
- .card{background:var(--card);padding:15px;border-radius:10px;margin:15px auto;max-width:500px;text-align:left}
- .btn{display:block;width:100%;padding:15px;margin:10px 0;border:none;border-radius:8px;font-size:18px;font-weight:bold;cursor:pointer}
- .btn-panic{background:var(--accent);color:white}
- .btn-sec{background:#374151;color:white}
- .btn-safe{background:var(--safe);color:white}
- .btn-warn{background:var(--warn);color:#000}
- .rules{font-size:14px;line-height:1.6}
- .rules li{margin:8px 0}
+.card{background:var(--card);padding:15px;border-radius:10px;margin:15px auto;max-width:500px;text-align:left}
+.btn{display:block;width:100%;padding:15px;margin:10px 0;border:none;border-radius:8px;font-size:18px;font-weight:bold;cursor:pointer}
+.btn-panic{background:var(--accent);color:white}
+.btn-sec{background:#374151;color:white}
+.btn-safe{background:var(--safe);color:white}
+.btn-warn{background:var(--warn);color:#000}
+.rules{font-size:14px;line-height:1.6}
+.rules li{margin:8px 0}
   #status{font-size:13px;color:var(--muted);margin-top:10px}
   input,select,textarea{width:100%;padding:10px;margin:5px 0;border:none;border-radius:6px;background:#1f2937;color:white}
- .hidden{display:none}
- .consent{font-size:12px;color:var(--muted);margin:10px 0}
- .loading{opacity:0.6;pointer-events:none}
+.hidden{display:none}
+.consent{font-size:12px;color:var(--muted);margin:10px 0}
+.loading{opacity:0.6;pointer-events:none}
 
   #fakeCalc{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:#1a1a1a;z-index:9999;padding:20px;box-sizing:border-box}
   #fakeCalc input{font-size:32px;text-align:right;background:#2a2a2a;border:none;color:white;padding:20px;margin-bottom:10px}
- .calc-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
- .calc-btn{background:#333;color:white;border:none;border-radius:50%;height:70px;font-size:24px}
+.calc-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.calc-btn{background:#333;color:white;border:none;border-radius:50%;height:70px;font-size:24px}
   #exitCalc{position:absolute;top:10px;right:10px;background:none;border:none;color:#666;font-size:24px}
 
   #map{height:250px;border-radius:8px;margin-top:10px}
- .incident{border-left:3px solid var(--accent);padding:8px;margin:8px 0;background:#1f2937}
- .live-indicator{display:inline-block;width:8px;height:8px;background:#28a745;border-radius:50%;animation:pulse 2s infinite}
+.incident{border-left:3px solid var(--accent);padding:8px;margin:8px 0;background:#1f2937}
+.live-indicator{display:inline-block;width:8px;height:8px;background:#28a745;border-radius:50%;animation:pulse 2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
- .spinner{display:inline-block;width:14px;height:14px;border:2px solid #555;border-top:2px solid var(--safe);border-radius:50%;animation:spin 1s linear infinite}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid #555;border-top:2px solid var(--safe);border-radius:50%;animation:spin 1s linear infinite}
   @keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
 </style>
 </head>
@@ -50,11 +50,13 @@
 </div>
 
 <div class="card hidden" id="setup">
-  <h3>Set 3 Emergency Contacts</h3>
+  <h3>Set 3 Emergency Contacts + Duress PIN</h3>
   <input type="tel" id="c1" placeholder="Contact 1: 082xxxxxxx">
   <input type="tel" id="c2" placeholder="Contact 2: 072xxxxxxx">
   <input type="tel" id="c3" placeholder="Contact 3: 071xxxxxxx">
+  <input type="password" id="duress" placeholder="Duress PIN: 1234 - Use if forced to unlock">
   <button class="btn btn-safe" onclick="saveContacts()">Save Contacts</button>
+  <p class="consent">Duress PIN: If forced to unlock, enter this PIN. It sends silent alert + cancels panic.</p>
 </div>
 
 <div class="card hidden" id="main">
@@ -122,7 +124,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
 import { getFirestore, collection, addDoc, query, orderBy, limit, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getStorage, ref, uploadBytes } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
-// 1. REPLACE THIS with your Firebase config from Firebase Console > Project Settings
+// REPLACE THIS with your Firebase config
 const firebaseConfig = {
   apiKey: "YOUR_API_KEY",
   authDomain: "your-project.firebaseapp.com",
@@ -137,12 +139,15 @@ const db = getFirestore(app);
 const storage = getStorage(app);
 
 let contacts = JSON.parse(localStorage.getItem('safe_contacts') || '[]');
-let mediaRecorder, audioChunks = [], audioBlob = null;
+let duressPin = localStorage.getItem('duress_pin') || '1234';
+let mediaRecorder, audioChunks = [];
 let tapCount = 0, tapTimer;
 let shakeCount = 0, lastShake = 0;
 let panicActive = false;
 let map, markers = [];
 let reportCooldown = 0;
+let locationWatchId = null;
+let wakeLock = null;
 
 const consentGiven = localStorage.getItem('consent') === 'true';
 if(consentGiven){
@@ -174,7 +179,6 @@ async function loadIncidents(){
       markers = [];
       const container = document.getElementById('recentIncidents');
       container.innerHTML = '';
-
       snapshot.forEach(doc => {
         const data = doc.data();
         if(data.lat && data.lng){
@@ -182,7 +186,6 @@ async function loadIncidents(){
           marker.bindPopup(`<b>${data.carDesc}</b><br>${data.locationDesc}<br>${new Date(data.timestamp?.toDate()).toLocaleString()}`);
           markers.push(marker);
         }
-
         container.innerHTML += `
           <div class="incident">
             <strong>${data.carDesc}</strong><br>
@@ -190,9 +193,7 @@ async function loadIncidents(){
           </div>
         `;
       });
-    }, (error) => {
-      log("Map load error: " + error.message);
-    });
+    }, (error) => log("Map load error: " + error.message));
   }catch(e){
     log("Firestore not connected. Check config.");
   }
@@ -211,7 +212,9 @@ window.acceptConsent = function(){
 window.saveContacts = function(){
   contacts = [document.getElementById('c1').value, document.getElementById('c2').value, document.getElementById('c3').value]
    .filter(n => n.length > 8);
+  duressPin = document.getElementById('duress').value || '1234';
   localStorage.setItem('safe_contacts', JSON.stringify(contacts));
+  localStorage.setItem('duress_pin', duressPin);
   alert('Contacts saved!');
   location.reload();
 }
@@ -230,7 +233,6 @@ window.hideReportForm = function(){
 }
 
 window.submitReport = async function(){
-  // Rate limiting: 1 report per 60 seconds per device
   const now = Date.now();
   if(now - reportCooldown < 60000){
     alert('Please wait 60 seconds between reports');
@@ -242,7 +244,6 @@ window.submitReport = async function(){
   btn.innerHTML = '<span class="spinner"></span> Submitting...';
 
   try{
-    // 2. FIX: Await geolocation properly
     const pos = await new Promise((res, rej) =>
       navigator.geolocation.getCurrentPosition(res, rej, {timeout:10000})
     );
@@ -263,7 +264,6 @@ window.submitReport = async function(){
     reportCooldown = now;
 
   }catch(e){
-    // 3. Save offline if failed
     const report = {
       carDesc: document.getElementById('carDesc').value,
       locationDesc: document.getElementById('locationDesc').value,
@@ -291,15 +291,19 @@ window.panic = async function(){
   log("Panic activated!");
   if(navigator.vibrate) navigator.vibrate([200,100,200,100,200]);
 
+  // Keep screen on
+  if('wakeLock' in navigator){
+    try{wakeLock = await navigator.wakeLock.request('screen');}catch(e){}
+  }
+
   try{
     const pos = await new Promise((res, rej) =>
       navigator.geolocation.getCurrentPosition(res, rej, {timeout:10000})
     );
 
     const link = `https://maps.google.com/?q=${pos.coords.latitude},${pos.coords.longitude}`;
-    const msg = `EMERGENCY ALERT: ${new Date().toLocaleTimeString()}\nI'm being stopped right now. Location: ${link}\nPlease call me or 10111.`;
+    const msg = `EMERGENCY ALERT: ${new Date().toLocaleTimeString()}\nI'm being stopped/kidnapped. Location: ${link}\nPlease call 10111 NOW.`;
 
-    // Open WhatsApp in background to avoid obvious app switching
     contacts.forEach(num => {
       const cleanNum = num.replace('+','').replace(' ','');
       window.open(`https://wa.me/27${cleanNum.substring(1)}?text=${encodeURIComponent(msg)}`, '_blank');
@@ -317,8 +321,9 @@ window.panic = async function(){
       deviceId: getDeviceId()
     });
 
-    log("Alert sent. Recording...");
+    log("Alert sent. Recording + tracking location...");
     startRecording();
+    startLocationTracking();
 
   }catch(e){
     log("GPS error: " + e.message);
@@ -326,11 +331,28 @@ window.panic = async function(){
   }
 }
 
+function startLocationTracking(){
+  if(locationWatchId) return;
+  locationWatchId = navigator.geolocation.watchPosition(async pos => {
+    await addDoc(collection(db, "locations"), {
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      timestamp: serverTimestamp(),
+      deviceId: getDeviceId()
+    }).catch(()=>{});
+  }, err => {}, {enableHighAccuracy:true, maximumAge:0, timeout:30000});
+}
+
 window.cancelPanic = function(){
   panicActive = false;
   if(mediaRecorder && mediaRecorder.state === 'recording'){
     mediaRecorder.stop();
   }
+  if(locationWatchId){
+    navigator.geolocation.clearWatch(locationWatchId);
+    locationWatchId = null;
+  }
+  if(wakeLock) wakeLock.release();
   document.getElementById('panicBtn').classList.remove('hidden');
   document.getElementById('cancelBtn').classList.add('hidden');
   log("Panic cancelled");
@@ -340,30 +362,23 @@ window.callPolice = function(){
   window.location.href = "tel:10111";
 }
 
+// Chunked upload every 5 seconds
 async function startRecording(){
   if(!consentGiven) return;
   try{
     const stream = await navigator.mediaDevices.getUserMedia({audio:true});
-    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder = new MediaRecorder(stream, {mimeType:'audio/webm'});
     audioChunks = [];
-    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-    mediaRecorder.onstop = async () => {
-      audioBlob = new Blob(audioChunks, {type:'audio/webm'});
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(audioBlob);
-      a.download = 'safestop_' + Date.now() + '.webm';
-      a.click();
 
-      try{
-        const storageRef = ref(storage, 'evidence/' + Date.now() + '.webm');
-        await uploadBytes(storageRef, audioBlob);
-        log("Audio uploaded to cloud");
-      }catch(e){
-        log("Audio saved locally only");
+    mediaRecorder.ondataavailable = async e => {
+      if(e.data.size > 0){
+        const chunkRef = ref(storage, `evidence/${getDeviceId()}/${Date.now()}.webm`);
+        await uploadBytes(chunkRef, e.data).catch(()=>{});
       }
     };
-    mediaRecorder.start();
-    log("Recording...");
+
+    mediaRecorder.start(5000);
+    log("Recording + uploading...");
   }catch(e){log("Mic error: " + e.message)}
 }
 
@@ -375,10 +390,7 @@ window.deleteAllData = function(){
   if(!confirm('Delete all local data? This cannot be undone.')){
     return;
   }
-  localStorage.removeItem('safe_contacts');
-  localStorage.removeItem('pending_reports');
-  localStorage.removeItem('consent');
-  localStorage.removeItem('deviceId');
+  localStorage.clear();
   alert('All data deleted');
   location.reload();
 }
@@ -401,7 +413,7 @@ async function checkOfflineQueue(){
   for(let report of pending){
     try{
       await addDoc(collection(db, "incidents"), {
-       ...report,
+      ...report,
         timestamp: serverTimestamp()
       });
     }catch(e){
@@ -430,6 +442,20 @@ function registerServiceWorker(){
     navigator.serviceWorker.register(swUrl);
   }
 }
+
+/* DURESS PIN CHECK */
+document.addEventListener('keydown', (e) => {
+  if(e.target.type === 'password' && e.target.value === duressPin && panicActive){
+    cancelPanic();
+    addDoc(collection(db, "incidents"), {
+      carDesc: "DURESS UNLOCK",
+      locationDesc: "User entered duress PIN",
+      timestamp: serverTimestamp(),
+      deviceId: getDeviceId()
+    });
+    alert('Unlocked');
+  }
+});
 
 /* STEALTH FEATURES */
 document.addEventListener('click', (e) => {
