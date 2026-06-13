@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SafeStop SA</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <style>
   :root {--bg:#0a0e1a;--card:#111827;--accent:#ef4444;--safe:#10b981;--text:#f9fafb;--muted:#9ca3af}
   body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);margin:0;padding:15px;text-align:center}
@@ -16,22 +17,25 @@
   .rules{font-size:14px;line-height:1.6}
   .rules li{margin:8px 0}
   #status{font-size:13px;color:var(--muted);margin-top:10px}
-  input{width:100%;padding:10px;margin:5px 0;border:none;border-radius:6px;background:#1f2937;color:white}
+  input,select,textarea{width:100%;padding:10px;margin:5px 0;border:none;border-radius:6px;background:#1f2937;color:white}
   .hidden{display:none}
   
-  /* Fake Calculator Styles */
   #fakeCalc{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:#1a1a1a;z-index:9999;padding:20px;box-sizing:border-box}
   #fakeCalc input{font-size:32px;text-align:right;background:#2a2a2a;border:none;color:white;padding:20px;margin-bottom:10px}
   .calc-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
   .calc-btn{background:#333;color:white;border:none;border-radius:50%;height:70px;font-size:24px}
-  .calc-btn:active{background:#555}
   #exitCalc{position:absolute;top:10px;right:10px;background:none;border:none;color:#666;font-size:24px}
+  
+  #map{height:250px;border-radius:8px;margin-top:10px}
+  .incident{border-left:3px solid var(--accent);padding:8px;margin:8px 0;background:#1f2937}
+  .live-indicator{display:inline-block;width:8px;height:8px;background:#28a745;border-radius:50%;animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
 </style>
 </head>
 <body>
 
 <div id="mainApp">
-<h1>SafeStop SA</h1>
+<h1>SafeStop SA <span class="live-indicator"></span></h1>
 
 <div class="card" id="setup">
   <h3>Set 3 Emergency Contacts</h3>
@@ -39,7 +43,6 @@
   <input type="tel" id="c2" placeholder="Contact 2: 072xxxxxxx">
   <input type="tel" id="c3" placeholder="Contact 3: 071xxxxxxx">
   <button class="btn btn-safe" onclick="saveContacts()">Save Contacts</button>
-  <p class="small">These people get auto-alerted when you hit panic</p>
 </div>
 
 <div class="card hidden" id="main">
@@ -47,20 +50,35 @@
   <div id="status">Ready - Triple tap to hide</div>
   
   <button class="btn btn-sec" onclick="callPolice()">📞 Call 10111</button>
+  <button class="btn btn-sec" onclick="showReportForm()">📝 Report Incident</button>
   <button class="btn btn-sec" onclick="toggleSetup()">⚙️ Change Contacts</button>
+</div>
+
+<div class="card hidden" id="reportForm">
+  <h3>Report Suspicious Stop</h3>
+  <input type="text" id="carDesc" placeholder="Car: White Audi A5">
+  <input type="text" id="locationDesc" placeholder="Location: M2 East near Denver">
+  <textarea id="details" placeholder="What happened?"></textarea>
+  <button class="btn btn-safe" onclick="submitReport()">Submit Report</button>
+  <button class="btn btn-sec" onclick="hideReportForm()">Cancel</button>
+</div>
+
+<div class="card">
+  <h3>Live Incident Map <span class="live-indicator"></span></h3>
+  <div id="map"></div>
+  <div id="recentIncidents"></div>
 </div>
 
 <div class="card">
   <h3>3 Rules If Stopped</h3>
   <ol class="rules">
-    <li><b>Don't stop in a dark area</b>. Drive slowly with hazards on to a police station, garage, or busy place.</li>
+    <li><b>Don't stop in a dark area</b>. Drive to a police station, garage, or busy place.</li>
     <li><b>Ask for ID</b>. Real officers show SAPS ID and force number.</li>
     <li><b>Call 10111 while driving</b>. Ask them to confirm if it's real.</li>
   </ol>
 </div>
 </div>
 
-<!-- Fake Calculator Screen -->
 <div id="fakeCalc">
   <button id="exitCalc" onclick="exitFakeCalc()">×</button>
   <input type="text" id="calcDisplay" value="0" readonly>
@@ -84,20 +102,73 @@
   </div>
 </div>
 
-<script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, collection, addDoc, query, orderBy, limit, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getStorage, ref, uploadBytes } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+
+// REPLACE THIS with your Firebase config from Firebase Console > Project Settings
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "your-project.firebaseapp.com",
+  projectId: "your-project-id",
+  storageBucket: "your-project.appspot.com",
+  messagingSenderId: "123456789",
+  appId: "1:123456789:web:abc123"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const storage = getStorage(app);
+
 let contacts = JSON.parse(localStorage.getItem('safe_contacts') || '[]');
-let mediaRecorder, audioChunks = [];
+let mediaRecorder, audioChunks = [], audioBlob = null;
 let tapCount = 0, tapTimer;
 let shakeCount = 0, lastShake = 0;
 let panicActive = false;
+let map, markers = [];
 
-// Show main app if contacts exist
 if(contacts.length > 0){
   document.getElementById('setup').classList.add('hidden');
   document.getElementById('main').classList.remove('hidden');
 }
 
-function saveContacts(){
+initMap();
+loadIncidents();
+
+function initMap(){
+  map = L.map('map').setView([-26.2041, 28.0473], 10); // JHB center
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+}
+
+async function loadIncidents(){
+  const q = query(collection(db, "incidents"), orderBy("timestamp", "desc"), limit(20));
+  onSnapshot(q, (snapshot) => {
+    markers.forEach(m => map.removeLayer(m));
+    markers = [];
+    const container = document.getElementById('recentIncidents');
+    container.innerHTML = '';
+    
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      if(data.lat && data.lng){
+        const marker = L.marker([data.lat, data.lng]).addTo(map);
+        marker.bindPopup(`<b>${data.carDesc}</b><br>${data.locationDesc}<br>${new Date(data.timestamp?.toDate()).toLocaleString()}`);
+        markers.push(marker);
+      }
+      
+      container.innerHTML += `
+        <div class="incident">
+          <strong>${data.carDesc}</strong><br>
+          <small>${data.locationDesc} - ${new Date(data.timestamp?.toDate()).toLocaleString()}</small>
+        </div>
+      `;
+    });
+  });
+}
+
+window.saveContacts = function(){
   contacts = [document.getElementById('c1').value, document.getElementById('c2').value, document.getElementById('c3').value]
     .filter(n => n.length > 8);
   localStorage.setItem('safe_contacts', JSON.stringify(contacts));
@@ -105,31 +176,72 @@ function saveContacts(){
   location.reload();
 }
 
-function toggleSetup(){
+window.toggleSetup = function(){
   document.getElementById('setup').classList.toggle('hidden');
   document.getElementById('main').classList.toggle('hidden');
 }
 
-async function panic(){
+window.showReportForm = function(){
+  document.getElementById('reportForm').classList.remove('hidden');
+}
+
+window.hideReportForm = function(){
+  document.getElementById('reportForm').classList.add('hidden');
+}
+
+window.submitReport = async function(){
+  const report = {
+    carDesc: document.getElementById('carDesc').value,
+    locationDesc: document.getElementById('locationDesc').value,
+    details: document.getElementById('details').value,
+    timestamp: serverTimestamp()
+  };
+  
+  navigator.geolocation.getCurrentPosition(pos => {
+    report.lat = pos.coords.latitude;
+    report.lng = pos.coords.longitude;
+  });
+  
+  try{
+    await addDoc(collection(db, "incidents"), report);
+    alert('Report submitted. Thank you!');
+    hideReportForm();
+  }catch(e){
+    alert('Saved offline. Will sync when online.');
+    // Save to localStorage for background sync
+    let pending = JSON.parse(localStorage.getItem('pending_reports') || '[]');
+    pending.push(report);
+    localStorage.setItem('pending_reports', JSON.stringify(pending));
+  }
+}
+
+window.panic = async function(){
   if(panicActive) return;
   panicActive = true;
   
   log("Panic activated!");
   if(navigator.vibrate) navigator.vibrate([200,100,200,100,200]);
 
-  navigator.geolocation.getCurrentPosition(pos => {
+  navigator.geolocation.getCurrentPosition(async pos => {
     const link = `https://maps.google.com/?q=${pos.coords.latitude},${pos.coords.longitude}`;
     const msg = `EMERGENCY ALERT: ${new Date().toLocaleTimeString()}\nI'm being stopped right now. Location: ${link}\nPlease call me or 10111.`;
     
-    // Send to contacts
     contacts.forEach(num => {
       const cleanNum = num.replace('+','').replace(' ','');
       window.open(`https://wa.me/27${cleanNum.substring(1)}?text=${encodeURIComponent(msg)}`, '_blank');
     });
     
-    // Send to Crime Stop
-    const crimeMsg = `SUSPICIOUS STOP ALERT: ${msg}`;
-    window.location.href = `sms:0860010111?body=${encodeURIComponent(crimeMsg)}`;
+    window.location.href = `sms:0860010111?body=${encodeURIComponent(msg)}`;
+    
+    // Save incident automatically
+    await addDoc(collection(db, "incidents"), {
+      carDesc: "PANIC ALERT",
+      locationDesc: "User triggered panic",
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      timestamp: serverTimestamp(),
+      auto: true
+    });
     
     log("Alert sent. Recording...");
     startRecording();
@@ -137,7 +249,7 @@ async function panic(){
   }, err => log("GPS error: " + err.message));
 }
 
-function callPolice(){
+window.callPolice = function(){
   window.location.href = "tel:10111";
 }
 
@@ -147,12 +259,21 @@ async function startRecording(){
     mediaRecorder = new MediaRecorder(stream);
     audioChunks = [];
     mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-    mediaRecorder.onstop = () => {
-      const blob = new Blob(audioChunks, {type:'audio/webm'});
+    mediaRecorder.onstop = async () => {
+      audioBlob = new Blob(audioChunks, {type:'audio/webm'});
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
+      a.href = URL.createObjectURL(audioBlob);
       a.download = 'safestop_' + Date.now() + '.webm';
       a.click();
+      
+      // Upload to Firebase Storage
+      try{
+        const storageRef = ref(storage, 'evidence/' + Date.now() + '.webm');
+        await uploadBytes(storageRef, audioBlob);
+        log("Audio uploaded to cloud");
+      }catch(e){
+        log("Audio saved locally only");
+      }
     };
     mediaRecorder.start();
     log("Recording...");
@@ -163,61 +284,50 @@ function log(msg){
   document.getElementById('status').innerText = new Date().toLocaleTimeString() + ": " + msg;
 }
 
-/* ========== STEALTH FEATURES ========== */
-
-// Triple tap to toggle fake calculator
+/* STEALTH FEATURES */
 document.addEventListener('click', (e) => {
-  if(e.target.closest('button, input')) return; // ignore button clicks
+  if(e.target.closest('button, input')) return;
   tapCount++;
   clearTimeout(tapTimer);
   tapTimer = setTimeout(() => tapCount = 0, 800);
-  
-  if(tapCount === 3){
-    toggleFakeCalc();
-    tapCount = 0;
-  }
+  if(tapCount === 3) toggleFakeCalc();
 });
 
-// Shake detection
 if(window.DeviceMotionEvent){
   window.addEventListener('devicemotion', (e) => {
     const acc = e.accelerationIncludingGravity;
     const totalForce = Math.abs(acc.x) + Math.abs(acc.y) + Math.abs(acc.z);
-    
-    if(totalForce > 20){ // shake detected
+    if(totalForce > 20){
       const now = Date.now();
       if(now - lastShake > 500){
         shakeCount++;
         lastShake = now;
-        
         if(shakeCount >= 3){
           if(!panicActive) panic();
           toggleFakeCalc();
           shakeCount = 0;
         }
-        
         setTimeout(() => shakeCount = 0, 2000);
       }
     }
   });
 }
 
-function toggleFakeCalc(){
+window.toggleFakeCalc = function(){
   const calc = document.getElementById('fakeCalc');
   calc.style.display = calc.style.display === 'block' ? 'none' : 'block';
 }
 
-function exitFakeCalc(){
+window.exitFakeCalc = function(){
   document.getElementById('fakeCalc').style.display = 'none';
 }
 
-// Fake calculator logic
 let calcExpr = '';
-function calcInput(val){
+window.calcInput = function(val){
   calcExpr += val;
   document.getElementById('calcDisplay').value = calcExpr;
 }
-function calcCalc(){
+window.calcCalc = function(){
   try{
     document.getElementById('calcDisplay').value = eval(calcExpr);
     calcExpr = document.getElementById('calcDisplay').value;
@@ -227,13 +337,22 @@ function calcCalc(){
   }
 }
 
-/* ========== INIT ========== */
+/* BACKGROUND SYNC */
+window.addEventListener('online', async () => {
+  let pending = JSON.parse(localStorage.getItem('pending_reports') || '[]');
+  for(let report of pending){
+    await addDoc(collection(db, "incidents"), report);
+  }
+  localStorage.removeItem('pending_reports');
+  log("Offline reports synced");
+});
+
+/* INIT */
 window.onload = () => {
   navigator.mediaDevices.getUserMedia({audio:true})
     .then(s => s.getTracks().forEach(t => t.stop()))
     .catch(()=>{});
   
-  // Request motion permission on iOS
   if(typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function'){
     document.body.addEventListener('click', () => {
       DeviceMotionEvent.requestPermission();
