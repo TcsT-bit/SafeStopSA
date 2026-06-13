@@ -18,10 +18,19 @@
   #status{font-size:13px;color:var(--muted);margin-top:10px}
   input{width:100%;padding:10px;margin:5px 0;border:none;border-radius:6px;background:#1f2937;color:white}
   .hidden{display:none}
+  
+  /* Fake Calculator Styles */
+  #fakeCalc{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:#1a1a1a;z-index:9999;padding:20px;box-sizing:border-box}
+  #fakeCalc input{font-size:32px;text-align:right;background:#2a2a2a;border:none;color:white;padding:20px;margin-bottom:10px}
+  .calc-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .calc-btn{background:#333;color:white;border:none;border-radius:50%;height:70px;font-size:24px}
+  .calc-btn:active{background:#555}
+  #exitCalc{position:absolute;top:10px;right:10px;background:none;border:none;color:#666;font-size:24px}
 </style>
 </head>
 <body>
 
+<div id="mainApp">
 <h1>SafeStop SA</h1>
 
 <div class="card" id="setup">
@@ -35,7 +44,7 @@
 
 <div class="card hidden" id="main">
   <button class="btn btn-panic" onclick="panic()">🚨 I'M BEING STOPPED</button>
-  <div id="status">Ready</div>
+  <div id="status">Ready - Triple tap to hide</div>
   
   <button class="btn btn-sec" onclick="callPolice()">📞 Call 10111</button>
   <button class="btn btn-sec" onclick="toggleSetup()">⚙️ Change Contacts</button>
@@ -44,16 +53,45 @@
 <div class="card">
   <h3>3 Rules If Stopped</h3>
   <ol class="rules">
-    <li><b>Don’t stop in a dark area</b>. Drive slowly with hazards on to a police station, garage, or busy place.</li>
+    <li><b>Don't stop in a dark area</b>. Drive slowly with hazards on to a police station, garage, or busy place.</li>
     <li><b>Ask for ID</b>. Real officers show SAPS ID and force number.</li>
-    <li><b>Call 10111 while driving</b>. Ask them to confirm if it’s real.</li>
+    <li><b>Call 10111 while driving</b>. Ask them to confirm if it's real.</li>
   </ol>
+</div>
+</div>
+
+<!-- Fake Calculator Screen -->
+<div id="fakeCalc">
+  <button id="exitCalc" onclick="exitFakeCalc()">×</button>
+  <input type="text" id="calcDisplay" value="0" readonly>
+  <div class="calc-grid">
+    <button class="calc-btn" onclick="calcInput('7')">7</button>
+    <button class="calc-btn" onclick="calcInput('8')">8</button>
+    <button class="calc-btn" onclick="calcInput('9')">9</button>
+    <button class="calc-btn" onclick="calcInput('/')">/</button>
+    <button class="calc-btn" onclick="calcInput('4')">4</button>
+    <button class="calc-btn" onclick="calcInput('5')">5</button>
+    <button class="calc-btn" onclick="calcInput('6')">6</button>
+    <button class="calc-btn" onclick="calcInput('*')">×</button>
+    <button class="calc-btn" onclick="calcInput('1')">1</button>
+    <button class="calc-btn" onclick="calcInput('2')">2</button>
+    <button class="calc-btn" onclick="calcInput('3')">3</button>
+    <button class="calc-btn" onclick="calcInput('-')">-</button>
+    <button class="calc-btn" onclick="calcInput('0')">0</button>
+    <button class="calc-btn" onclick="calcInput('.')">.</button>
+    <button class="calc-btn" onclick="calcCalc()">=</button>
+    <button class="calc-btn" onclick="calcInput('+')">+</button>
+  </div>
 </div>
 
 <script>
 let contacts = JSON.parse(localStorage.getItem('safe_contacts') || '[]');
 let mediaRecorder, audioChunks = [];
+let tapCount = 0, tapTimer;
+let shakeCount = 0, lastShake = 0;
+let panicActive = false;
 
+// Show main app if contacts exist
 if(contacts.length > 0){
   document.getElementById('setup').classList.add('hidden');
   document.getElementById('main').classList.remove('hidden');
@@ -73,27 +111,27 @@ function toggleSetup(){
 }
 
 async function panic(){
+  if(panicActive) return;
+  panicActive = true;
+  
   log("Panic activated!");
   if(navigator.vibrate) navigator.vibrate([200,100,200,100,200]);
 
-  // Get location
   navigator.geolocation.getCurrentPosition(pos => {
     const link = `https://maps.google.com/?q=${pos.coords.latitude},${pos.coords.longitude}`;
     const msg = `EMERGENCY ALERT: ${new Date().toLocaleTimeString()}\nI'm being stopped right now. Location: ${link}\nPlease call me or 10111.`;
     
-    // 1. Send to 3 contacts via WhatsApp/SMS
+    // Send to contacts
     contacts.forEach(num => {
       const cleanNum = num.replace('+','').replace(' ','');
       window.open(`https://wa.me/27${cleanNum.substring(1)}?text=${encodeURIComponent(msg)}`, '_blank');
     });
     
-    // 2. Send silent SMS to Crime Stop 08600 10111
+    // Send to Crime Stop
     const crimeMsg = `SUSPICIOUS STOP ALERT: ${msg}`;
     window.location.href = `sms:0860010111?body=${encodeURIComponent(crimeMsg)}`;
     
-    log("Alert sent to contacts + Crime Stop. Starting recording...");
-    
-    // 3. Start recording
+    log("Alert sent. Recording...");
     startRecording();
     
   }, err => log("GPS error: " + err.message));
@@ -125,9 +163,82 @@ function log(msg){
   document.getElementById('status').innerText = new Date().toLocaleTimeString() + ": " + msg;
 }
 
-// Get mic permission early
+/* ========== STEALTH FEATURES ========== */
+
+// Triple tap to toggle fake calculator
+document.addEventListener('click', (e) => {
+  if(e.target.closest('button, input')) return; // ignore button clicks
+  tapCount++;
+  clearTimeout(tapTimer);
+  tapTimer = setTimeout(() => tapCount = 0, 800);
+  
+  if(tapCount === 3){
+    toggleFakeCalc();
+    tapCount = 0;
+  }
+});
+
+// Shake detection
+if(window.DeviceMotionEvent){
+  window.addEventListener('devicemotion', (e) => {
+    const acc = e.accelerationIncludingGravity;
+    const totalForce = Math.abs(acc.x) + Math.abs(acc.y) + Math.abs(acc.z);
+    
+    if(totalForce > 20){ // shake detected
+      const now = Date.now();
+      if(now - lastShake > 500){
+        shakeCount++;
+        lastShake = now;
+        
+        if(shakeCount >= 3){
+          if(!panicActive) panic();
+          toggleFakeCalc();
+          shakeCount = 0;
+        }
+        
+        setTimeout(() => shakeCount = 0, 2000);
+      }
+    }
+  });
+}
+
+function toggleFakeCalc(){
+  const calc = document.getElementById('fakeCalc');
+  calc.style.display = calc.style.display === 'block' ? 'none' : 'block';
+}
+
+function exitFakeCalc(){
+  document.getElementById('fakeCalc').style.display = 'none';
+}
+
+// Fake calculator logic
+let calcExpr = '';
+function calcInput(val){
+  calcExpr += val;
+  document.getElementById('calcDisplay').value = calcExpr;
+}
+function calcCalc(){
+  try{
+    document.getElementById('calcDisplay').value = eval(calcExpr);
+    calcExpr = document.getElementById('calcDisplay').value;
+  }catch{
+    document.getElementById('calcDisplay').value = 'Error';
+    calcExpr = '';
+  }
+}
+
+/* ========== INIT ========== */
 window.onload = () => {
-  navigator.mediaDevices.getUserMedia({audio:true}).then(s => s.getTracks().forEach(t => t.stop())).catch(()=>{});
+  navigator.mediaDevices.getUserMedia({audio:true})
+    .then(s => s.getTracks().forEach(t => t.stop()))
+    .catch(()=>{});
+  
+  // Request motion permission on iOS
+  if(typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function'){
+    document.body.addEventListener('click', () => {
+      DeviceMotionEvent.requestPermission();
+    }, {once:true});
+  }
 }
 </script>
 </body>
